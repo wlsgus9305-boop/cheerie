@@ -48,6 +48,9 @@ G_HOT       = 560.0
 G_MAX       = 610.0
 HOT_TIMEOUT = 1.15
 HOT_DROP_TO = 110.0
+CHEER_MOUTH_TIMEOUT = 0.9
+CHEER_EXIT_TIMEOUT = 2.6
+SLEEPY_AFTER = 24.0
 
 # 공통 팔레트
 C = {
@@ -279,9 +282,28 @@ def _remove_bg(img: Image.Image, tol: int = 80) -> Image.Image:
         ImageDraw.floodfill(rgba, corner, (0, 0, 0, 0), thresh=tol)
     return rgba
 
+def _clean_green_fringe(img: Image.Image) -> Image.Image:
+    rgba = img.convert("RGBA")
+    fixed = []
+    changed = False
+    for r, g, b, a in rgba.getdata():
+        if a and g > 70 and g > r + 8 and g > b + 8:
+            fixed.append((r, g, b, 0))
+            changed = True
+        elif a and g > 50 and g > r and g > b:
+            warm = max(r, b)
+            fixed.append((min(255, warm + 4), max(0, warm - 1), min(255, b + 2), a))
+            changed = True
+        else:
+            fixed.append((r, g, b, a))
+    if changed:
+        rgba.putdata(fixed)
+    return rgba
+
 def load_photo(path, max_w, max_h, flip_h=False, flip_v=False, chroma_bg=True):
     raw = Image.open(path)
     raw = _remove_bg(raw, tol=80)
+    raw = _clean_green_fringe(raw)
     raw.thumbnail((max_w, max_h), Image.LANCZOS)
     if flip_h: raw = raw.transpose(Image.FLIP_LEFT_RIGHT)
     if flip_v: raw = raw.transpose(Image.FLIP_TOP_BOTTOM)
@@ -325,9 +347,9 @@ class FallbackDrawer:
         if   state=="idle":  dy=math.sin(t*1.8)*2.5;ey="n"
         elif state=="cheer": dy=abs(math.sin(t*4.5))*-10;ey="h"
         elif state in("cheerhot","alarm"): dy=abs(math.sin(t*6))*-14;ey="h"
-        elif state=="happy": dy=math.sin(t*3)*3;ey="h"
+        elif state in("happy","cuddle","sleepy"): dy=math.sin(t*3)*3;ey="h"
         else: dy=0;ey="n"
-        au=state in("cheer","cheerhot","alarm","happy")
+        au=state in("cheer","cheerhot","alarm","happy","cuddle")
         self._poly([20,42+dy,32,28+dy,27,22+dy,42,10+dy,36,4+dy,50,-10+dy,
                     40,-7+dy,34,-22+dy,24,-13+dy,34,-3+dy,18,14+dy,26,19+dy,16,34+dy],
                    fill=self.Y,outline=self.DY,width=2)
@@ -376,12 +398,16 @@ class CharacterSprite:
             try: return load_photo(p,self.IMG_W,self.IMG_H,self.flip_h,self.flip_v,self.chroma_bg)
             except Exception as e: print(f"이미지 오류 {fn}: {e}"); return None
         idle_ph=_lp("idle.png"); cheer_ph=_lp("cheer.png")
-        happy_ph=_lp("happy.png"); hot1_ph=_lp("cheerhot1.png"); hot2_ph=_lp("cheerhot2.png")
+        happy_ph=_lp("happy.png"); sleepy_ph=_lp("sleepy.png")
+        hot1_ph=_lp("cheerhot1.png"); hot2_ph=_lp("cheerhot2.png")
         if not idle_ph:
             self._fallback=FallbackDrawer(self.c,self.cx,self.cy); return
         self._photos["idle"]    =[idle_ph]
         self._photos["cheer"]   =[p for p in [idle_ph,cheer_ph] if p]
         self._photos["happy"]   =[p for p in [happy_ph,cheer_ph] if p]
+        self._photos["cuddle"]   =[sleepy_ph or happy_ph or idle_ph]
+        self._photos["cooldown"] =[idle_ph]
+        self._photos["sleepy"]   =[sleepy_ph or idle_ph]
         self._photos["cheerhot"]=[p for p in [hot1_ph,hot2_ph] if p]
         self._photos["alarm"]   =[p for p in [hot1_ph,hot2_ph] if p]
         if self._img_item is None:
@@ -431,6 +457,9 @@ class CharacterSprite:
             fi=int(t*(4.5 if state in("cheerhot","alarm") else 3.0))%len(frames)
         else: fi=0
         if   state=="idle":                dy=math.sin(t*1.8)*3
+        elif state=="cuddle":              dy=math.sin(t*1.5)*1.4
+        elif state=="sleepy":              dy=math.sin(t*0.9)*1.8
+        elif state=="cooldown":            dy=math.sin(t*1.4)*2.0
         elif state=="cheer":               dy=abs(math.sin(t*4.5))*-10
         elif state in("cheerhot","alarm"): dy=abs(math.sin(t*6))*-14
         else:                              dy=0
@@ -438,7 +467,7 @@ class CharacterSprite:
         self.c.coords(self._img_item, self.cx, self.cy+dy)
         cheer_amt = max(0.0, min(1.0, (gauge - G_CHEER) / max(1.0, G_HOT - G_CHEER)))
         hot_amt = max(0.0, min(1.0, (gauge - G_HOT) / max(1.0, G_MAX - G_HOT)))
-        if state=="happy":
+        if state in("happy","cuddle"):
             for i in range(3):
                 off=i*2.09
                 hx=math.sin(t+off)*50; hy=-90-((t*20+i*18)%60)
@@ -449,6 +478,21 @@ class CharacterSprite:
                 off=i*(math.tau/max(1,count))
                 self._star(math.cos(t*1.55+off)*58,math.sin(t*1.55+off)*30-48,
                            5.5+math.sin(t*2.1+off)*1.3,"#FFD84A","#E3A018")
+        elif state=="cooldown":
+            count = 1 + int(cheer_amt * 1.8)
+            for i in range(count):
+                off=i*(math.tau/max(1,count))
+                self._star(math.cos(t*0.9+off)*48,math.sin(t*0.9+off)*22-46,
+                           4.3+math.sin(t*1.5+off)*0.8,"#FFE88A","#D6A31A")
+        elif state=="sleepy":
+            for i, z in enumerate(("Z", "z")):
+                x=44+i*15
+                y=-82-((t*8+i*18)%34)
+                if self.flip_h: x=-x
+                if self.flip_v: y=-y
+                item=self.c.create_text(self.cx+x,self.cy+y,text=z,
+                                        fill="#9BCBFF",font=("Arial",11-i*2,"bold"))
+                self._fx.append(item)
         elif state in("cheerhot","alarm"):
             count = 4 + int(hot_amt * 2.0)
             for i in range(count):
@@ -850,6 +894,7 @@ class App:
     def _lclick(self, e):
         self._drag_xy = (e.x, e.y); self._moved = False
         self._pressing = True
+        self._force("cuddle", 0.35)
         self._start_heart_loop()
 
     def _start_heart_loop(self):
@@ -863,7 +908,10 @@ class App:
         if alarm_active:
             self._heart_job = None
             return
-        if active_press or getattr(self, "_hovering", False):
+        if active_press:
+            self._force("cuddle", 0.35)
+            self._heart_job = self.root.after(90, self._heart_repeat)
+        elif getattr(self, "_hovering", False):
             self._force("happy", 0.35)
             self._heart_job = self.root.after(90, self._heart_repeat)
         else:
@@ -881,6 +929,8 @@ class App:
         self._pressing = False; self._drag_xy = None
         if not getattr(self, "_moved", False):
             self._force("happy", 1.2)
+        elif self._hovering:
+            self._force("happy", 0.45)
         if self._hovering:
             self._start_heart_loop()
 
@@ -947,15 +997,17 @@ class App:
         if no_key < 0.3:
             decay = G_DECAY_HI if self._gauge > G_CHEER else G_DECAY_LO
         else:
-            cool_accel = min(1.0, max(0.0, (no_key - 0.3) / 1.3))
+            cool_accel = min(1.0, max(0.0, (no_key - 0.3) / 1.0))
             if self._gauge < G_HOT:
-                decay = 34.0 + 56.0 * cool_accel
+                decay = 34.0 + 76.0 * (cool_accel * cool_accel)
             else:
                 decay = max(38.0, self._gauge / 2.6)
         self._gauge = max(0.0, self._gauge - decay*dt)
 
         if prev == "cheerhot" and no_key >= HOT_TIMEOUT:
             self._gauge = min(self._gauge, HOT_DROP_TO); self._hot_drop = True
+        if no_key >= CHEER_EXIT_TIMEOUT and self._gauge < G_HOT:
+            self._gauge = min(self._gauge, G_CHEER - 1.0)
 
         with self._lock:
             if self._forced_state and now < self._force_until:
@@ -965,7 +1017,9 @@ class App:
 
         if forced:               st = forced
         elif self._gauge>=G_HOT: st = "cheerhot"
-        elif self._gauge>=G_CHEER: st = "cheer"
+        elif no_key>=SLEEPY_AFTER: st = "sleepy"
+        elif self._gauge>=G_CHEER:
+            st = "cheer" if no_key < CHEER_MOUTH_TIMEOUT else "cooldown"
         else:                    st = "idle"
 
         self._visual_gauge += (self._gauge - self._visual_gauge) * 0.24

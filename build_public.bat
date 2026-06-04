@@ -21,6 +21,7 @@ if not exist "%D%icon.ico" (
   --add-data "%D%idle.png;." ^
   --add-data "%D%cheer.png;." ^
   --add-data "%D%happy.png;." ^
+  --add-data "%D%sleepy.png;." ^
   --add-data "%D%cheerhot1.png;." ^
   --add-data "%D%cheerhot2.png;." ^
   --hidden-import pynput.keyboard ^
